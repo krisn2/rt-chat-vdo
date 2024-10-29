@@ -1,22 +1,25 @@
-import {server as WebSocketServer, request as WebSocketRequest, connection as WebSocketConnection, Message} from "websocket";
+import {server as WebSocketServer, request as WebSocketRequest, connection as WebSocketConnection, Message, connection} from "websocket";
 import http from "http";
+import { UserManager,} from "./UserManager";
+import { IncomingMessage, SupportedMessage } from "./messages/incomingMessages";
+import { InMemoryStore } from "./store/InMemoryStore";
+import {  SupportedMessage as OutgoingSupportedMessages, OutgoingMessage} from "./messages/outgoingMessages";
 
-var httpServer = http.createServer(function(request: http.IncomingMessage, response: http.ServerResponse) {
+const server = http.createServer(function(request:any, response: any) {
     console.log((new Date()) + ' Received request for ' + request.url);
     response.writeHead(404);
     response.end();
 });
-httpServer.listen(8080, function() {
+
+const userManager = new UserManager();
+const store = new InMemoryStore();
+
+server.listen(8080, function() {
     console.log((new Date()) + ' Server is listening on port 8080');
 });
 
 const wsServer = new WebSocketServer({
-    httpServer: httpServer,
-    // You should not use autoAcceptConnections for production
-    // applications, as it defeats all standard cross-origin protection
-    // facilities built into the protocol and the browser.  You should
-    // *always* verify the connection's origin and decide whether or not
-    // to accept it.
+    httpServer: server,
     autoAcceptConnections: false
 });
 
@@ -37,15 +40,70 @@ wsServer.on('request', function(request: WebSocketRequest) {
     console.log((new Date()) + ' Connection accepted.');
     connection.on('message', function(message: Message) {
         if (message.type === 'utf8') {
-            console.log('Received Message: ' + message.utf8Data);
-            connection.sendUTF(message.utf8Data);
-        }
-        else if (message.type === 'binary') {
-            console.log('Received Binary Message of ' + message.binaryData.length + ' bytes');
-            connection.sendBytes(message.binaryData);
+            try{
+                messageHandler(connection, JSON.parse(message.utf8Data))
+            } catch(e){
+
+            }
+            // console.log('Received Message: ' + message.utf8Data);
+            // connection.sendUTF(message.utf8Data);
         }
     });
     connection.on('close', function(reasonCode: number, description: string) {
         console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
     });
 });
+
+function messageHandler(ws:connection,message:IncomingMessage) {
+    if(message.type == SupportedMessage.JoinRoom){
+        const payload = message.payload;
+        userManager.addUser(payload.name, payload.roomId,payload.userId,ws);
+    }
+    if(message.type === SupportedMessage.SendMessage) {
+        const payload = message.payload;
+        const user = userManager.getUser(payload.userId, payload.roomId);
+
+        if (!user){
+          console.log("User not found in db..")  
+            return
+        }
+
+        let chat = store.addChats(payload.userId, user.name, payload.roomId, payload.message);
+        if (!chat) {
+            return;
+        }
+
+        const outgoingPayload: OutgoingMessage ={
+            type: OutgoingSupportedMessages.AddChat,
+                payload:{
+                    chatId:chat.id,
+                    roomId:payload.roomId,
+                    message:payload.message,
+                    name:user.name,
+                    upvotes:0
+                }
+
+     
+        }
+        userManager.broadcast(payload.roomId,  outgoingPayload, payload.userId);
+
+    }
+    if (message.type === SupportedMessage.UpvoteMessage) {
+        const payload = message.payload;
+        const chat = store.upvote(payload.userId, payload.roomId, payload.chatId)
+        if (!chat){
+            return;
+        }
+        const outgoingPayload: OutgoingMessage ={
+            type: OutgoingSupportedMessages.UpdateChat,
+                payload:{
+                    chatId:payload.chatId,
+                    roomId:payload.roomId,
+                    upvotes:chat.upvotes.length
+                }
+
+     
+        }
+        userManager.broadcast(payload.roomId,  outgoingPayload, payload.userId)
+    }
+}
